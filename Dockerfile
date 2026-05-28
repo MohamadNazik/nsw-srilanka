@@ -1,22 +1,27 @@
 FROM golang:1.25-bookworm AS builder
 
-# Install git (required for go modules that reference private repos)
+# Install git (required for cloning the nsw shared library)
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+# Clone the nsw shared library (public repo; Go module lives in backend/)
+ARG NSW_REF=main
+RUN git clone --depth 1 --branch ${NSW_REF} \
+    https://github.com/OpenNSW/nsw.git /deps/nsw
 
 WORKDIR /src
 
 # Cache go.mod / go.sum first
 COPY go.mod go.sum ./
-# Remove any local replace that points outside the repo (e.g., ../nsw/backend)
-RUN cp go.mod go.mod.tmp && \
-    grep -v '^replace .* => \..\/' go.mod.tmp > go.mod && \
-    rm go.mod.tmp
+# Rewrite the local replace directive to point at the cloned copy
+RUN go mod edit -replace github.com/OpenNSW/nsw=/deps/nsw/backend
 
 # Download dependencies
 RUN go mod download
 
 # Copy the full source tree
 COPY . .
+# Re-apply replace (COPY overwrites go.mod with the repo's original)
+RUN go mod edit -replace github.com/OpenNSW/nsw=/deps/nsw/backend
 
 # Ensure bucket directory exists for runtime data
 RUN mkdir -p /src/bucket
