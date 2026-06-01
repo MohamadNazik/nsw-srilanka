@@ -38,41 +38,66 @@ The Sri Lanka–specific FCAU workflow lives under `configs/fcau/` as a set of J
 
 ## How to Run Locally
 
-### 1. Prerequisites
-- **Go** `1.25.7` or higher
-- **PostgreSQL** running on `localhost:5432` (default values match `.env.example`)
-- **Temporal** server on `localhost:7233` — start a dev instance with:
-  ```bash
-  temporal server start-dev
-  ```
-- **NSW Agency** backend running on `http://localhost:8082` if you want to exercise the FCAU officer-review flow end-to-end. See [OpenNSW/nsw-agency](https://github.com/OpenNSW/nsw-agency).
-
-### 2. Prepare local config files
-
+### 1. Prepare local config files
 Copy the templates and edit each one for your environment:
-
 ```bash
 cp .env.example .env
 cp configs/services.example.json configs/services.json
 cp configs/payment_methods.example.json configs/payment_methods.json
 ```
+The FCAU workflow JSON tree under `configs/fcau/` is gitignored — make sure you have pulled it from your team's workflow template store before running the application.
 
-The FCAU workflow JSON tree under `configs/fcau/` is also gitignored — pull it from your team's secure store or generate it from your workflow templates before the first run.
+### 2. Start the Docker Stack
+The repository provides a unified `docker-compose.yml` stack that brings up all required backing services (PostgreSQL, IDP, Temporal) and runs the Go backend API container with hot-reloading and multi-repo workspace linking enabled.
 
-### 3. Run the server
-
+To start the services:
 ```bash
-set -a; source .env; set +a
-go run ./cmd/server
+docker compose up -d
 ```
+This spins up:
+* **`nsw-postgres`** (Port `5432`): Database populated with base tables/schemas.
+* **`nsw-idp`** (Port `8090`): Thunder Identity Provider.
+* **`temporal`** (Port `7233`) & **`temporal-ui`** (Port `8233`): Temporal workflow orchestration engine.
+* **`nsw-backend-api`** (Port `8080`): The Go backend server running `go run ./cmd/server` inside the container in watch/reload mode.
 
-`go run` reads from the process environment; `set -a; source .env; set +a` exports every variable from `.env` so the upstream `internal/config` loader sees them.
-
-Or one-shot, without polluting your shell:
-
+#### 2. Start the Frontend (Trader Portal)
+The Trader Portal frontend remains in the sibling `nsw` repository for now. You must run it locally from there:
 ```bash
-env $(grep -v '^#' .env | xargs) go run ./cmd/server
+cd ../nsw
+./start-dev.sh
 ```
+This runs the frontend dev server on `http://localhost:5173`, proxying backend requests to the Docker container at `localhost:8080` and auth requests to the Thunder IDP at `localhost:8090`.
+
+#### 3. Sibling Repositories & Local Development (`go.work`)
+To facilitate seamless editing of sibling packages without pushing changes to GitHub, the backend API container is configured to use Go workspaces. 
+
+It mounts `nsw-srilanka` to `/src` and bind-mounts sibling directories:
+* `../nsw` -> `/nsw`
+* `../nsw-task-flow` -> `/nsw-task-flow`
+* `../go-temporal-workflow` -> `/go-temporal-workflow`
+
+This relies on the `go.work` file at the root of `nsw-srilanka`:
+```go
+go 1.25.7
+
+use (
+	.
+	../nsw-task-flow
+	../go-temporal-workflow
+	../nsw/backend
+)
+```
+To compile and apply your latest Go code changes from any of these local directories, you do not need to restart the entire database/IDP stack. You can quickly rebuild and restart just the backend API container:
+```bash
+docker compose up -d --force-recreate api
+```
+Or simply:
+```bash
+docker compose restart api
+```
+This re-runs `go run` inside the container, rebuilding and starting your backend in seconds while keeping PostgreSQL, Temporal, and the IDP running undisturbed.
+
+---
 
 ### 4. Verify
 
