@@ -1,0 +1,25 @@
+{
+  "id": "fcau-warehouse-inspection-flow:render",
+  "type": "REVIEW",
+  "sections": {
+    "reference": {
+      "id": "reference",
+      "templateId": "fcau-warehouse-inspection--officer-form",
+      "title": "Warehouse Inspection Outcome",
+      "projector": "FORM",
+      "dataKey": "reviewerform"
+    }
+  },
+  "states": {
+    "PENDING_USER": {
+      "actions": [
+        {
+          "kind": "submit_form",
+          "label": "Submit inspection outcome",
+          "command": "submit",
+          "variant": "primary"
+        }
+      ]
+    }
+  }
+}

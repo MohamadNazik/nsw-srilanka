@@ -10,6 +10,8 @@ import (
 	engine "github.com/OpenNSW/go-temporal-workflow"
 	flowplugins "github.com/OpenNSW/nsw-task-flow/plugins"
 	"github.com/OpenNSW/nsw/backend/internal/workflow"
+	"go.temporal.io/sdk/client"
+	"gorm.io/gorm"
 
 	"github.com/OpenNSW/nsw/backend/internal/auth"
 	"github.com/OpenNSW/nsw/backend/internal/config"
@@ -23,11 +25,14 @@ import (
 	"github.com/OpenNSW/nsw/backend/internal/profile/user"
 	"github.com/OpenNSW/nsw/backend/internal/taskv2"
 	taskv2plugins "github.com/OpenNSW/nsw/backend/internal/taskv2/plugins"
+	"github.com/OpenNSW/nsw/backend/internal/taskv2/registry"
+	taskrenderer "github.com/OpenNSW/nsw/backend/internal/taskv2/renderer"
 	"github.com/OpenNSW/nsw/backend/internal/temporal"
 	"github.com/OpenNSW/nsw/backend/internal/workflow/service"
 	"github.com/OpenNSW/nsw/backend/pkg/remote"
 	"github.com/OpenNSW/nsw/backend/pkg/storage"
 	"github.com/OpenNSW/nsw/backend/pkg/storage/drivers"
+	"github.com/OpenNSW/nsw/backend/pkg/uiprojector"
 
 	"github.com/OpenNSW/nsw/backend/pkg/notification"
 	"github.com/OpenNSW/nsw/backend/pkg/notification/channels"
@@ -65,7 +70,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // Build initializes dependencies and returns a fully wired application server.
+// The initialization flow is structured in distinct stages to ensure readability.
 func Build(ctx context.Context, cfg *config.Config) (*App, error) {
+	// -------------------------------------------------------------------
+	// Stage 1: Relational Database & Connection Health Check
+	// -------------------------------------------------------------------
 	db, err := database.New(cfg.Database)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -76,6 +85,9 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("database health check failed: %w", err)
 	}
 
+	// -------------------------------------------------------------------
+	// Stage 2: Domain Core Repositories & Base Services
+	// -------------------------------------------------------------------
 	paymentRepo := payments.NewPaymentRepository(db)
 	paymentService, err := payments.NewPaymentService(paymentRepo, cfg.Server.PaymentMethodsConfigPath)
 	if err != nil {
@@ -83,18 +95,30 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("failed to initialize payment service: %w", err)
 	}
 
-	templateService := service.NewTemplateService(db)
+	templateRegistry := registry.NewInMemRegistry()
+	if err := registry.LoadConfigsInto(templateRegistry, "configs/fcau"); err != nil {
+		_ = database.Close(db)
+		return nil, fmt.Errorf("failed to load taskv2 configs: %w", err)
+	}
+
+	templateService := service.NewTemplateService(db).WithRegistry(templateRegistry)
 	chaService := cha.NewService(db)
 	companyService := company.NewService(db)
 	userProfileService := user.NewService(db)
 	hsCodeService := hscode.NewService(db)
 
+	// -------------------------------------------------------------------
+	// Stage 3: Temporal Orchestration Engine Client
+	// -------------------------------------------------------------------
 	temporalClient, err := temporal.NewClient(cfg.Temporal)
 	if err != nil {
 		_ = database.Close(db)
 		return nil, fmt.Errorf("failed to create temporal client: %w", err)
 	}
 
+	// -------------------------------------------------------------------
+	// Stage 4: Task V2 Sub-System Setup
+	// -------------------------------------------------------------------
 	// parentRunner is forward-declared so the taskv2 completion callback can
 	// close over it. It is assigned below after WireParentRunner returns; the
 	// closure is only invoked when a task workflow finishes, by which point
@@ -104,30 +128,18 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return parentRunner.TaskDone(context.Background(), parentWorkflowID, parentRunID, parentNodeID, finalVariables)
 	}
 
-	remoteManager := remote.NewManager()
-	if err := remoteManager.LoadServices(cfg.Server.ServicesConfigPath); err != nil {
-		temporalClient.Close()
-		_ = database.Close(db)
-		return nil, fmt.Errorf("failed to load remote services from %s: %w", cfg.Server.ServicesConfigPath, err)
-	}
-
-	pluginsRegistry := flowplugins.NewRegistry()
-	if err := taskv2plugins.Register(pluginsRegistry, remoteManager, paymentService, cfg.Server.ServiceURL, cfg.Server.Debug); err != nil {
-		temporalClient.Close()
-		_ = database.Close(db)
-		return nil, fmt.Errorf("failed to register taskv2 plugins: %w", err)
-	}
-
-	taskV2, stopTaskV2, err := taskv2.WireTaskV2(db, temporalClient, pluginsRegistry, paymentService, onTaskCompleted)
+	taskV2, stopTaskV2, err := initTaskV2(db, temporalClient, paymentService, templateRegistry, cfg, onTaskCompleted)
 	if err != nil {
 		temporalClient.Close()
 		_ = database.Close(db)
-		return nil, fmt.Errorf("failed to wire taskv2: %w", err)
+		return nil, err
 	}
 	tm := taskV2.Manager
-
 	paymentService.SetTaskCompleter(tm)
 
+	// -------------------------------------------------------------------
+	// Stage 5: Consignment Service & Workflow Parent Runner
+	// -------------------------------------------------------------------
 	consignmentService := consignment.NewService(db, templateService, chaService, companyService, userProfileService, hsCodeService)
 	consignmentRouter := consignment.NewRouter(consignmentService, chaService, companyService)
 
@@ -148,10 +160,9 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("failed to register workflow manager with consignment service: %w", err)
 	}
 
-	hsCodeRouter := hscode.NewRouter(hsCodeService)
-	chaHandler := cha.NewHandler(chaService)
-	companyHandler := company.NewHandler(companyService)
-
+	// -------------------------------------------------------------------
+	// Stage 6: File Storage Provider Setup
+	// -------------------------------------------------------------------
 	storageDriver, err := storage.NewStorageFromConfig(ctx, cfg.Storage)
 	if err != nil {
 		_ = stopParentRunner()
@@ -163,8 +174,9 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	storageService := storage.NewService(storageDriver)
 	storageHandler := storage.NewHTTPHandler(storageService)
 
-	paymentHandler := payments.NewHTTPHandler(paymentService)
-
+	// -------------------------------------------------------------------
+	// Stage 7: Identity Provider (IDP) Authentication Manager
+	// -------------------------------------------------------------------
 	authManager, err := auth.NewManager(userProfileService, cfg.Auth)
 	if err != nil {
 		_ = stopParentRunner()
@@ -183,6 +195,9 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("auth system health check failed: %w", err)
 	}
 
+	// -------------------------------------------------------------------
+	// Stage 8: Notification Channels Setup
+	// -------------------------------------------------------------------
 	// Initialize notification manager
 	notificationManager := notification.NewManager()
 	emailChannel := channels.NewEmailChannel(notification.EmailConfig{
@@ -199,6 +214,13 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	// smsChannel := channels.NewSMSChannel(...)
 	// notificationManager.RegisterSMSChannel(smsChannel)
 
+	// -------------------------------------------------------------------
+	// Stage 9: HTTP Route & Middleware Registration
+	// -------------------------------------------------------------------
+	hsCodeRouter := hscode.NewRouter(hsCodeService)
+	chaHandler := cha.NewHandler(chaService)
+	companyHandler := company.NewHandler(companyService)
+	paymentHandler := payments.NewHTTPHandler(paymentService)
 	taskV2Handler := taskv2.NewHTTPHandler(tm, taskV2.Store, taskV2.Assembler)
 
 	// withAuth wraps an individual handler with the authentication middleware.
@@ -239,11 +261,13 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	// alongside these without restructuring the mux.
 	mux.Handle("GET /api/v1/tasks/{id}", withAuth(http.HandlerFunc(taskV2Handler.HandleGetTask)))
 	mux.Handle("POST /api/v1/tasks/{id}", withAuth(http.HandlerFunc(taskV2Handler.HandleCompleteTaskStep)))
+
 	// TODO(oga-callback): remove once OGA POSTs directly to /api/v1/tasks/{id}
 	// with the bare reviewer payload. This legacy route accepts OGA's
 	// {task_id, workflow_id, payload:{action, content}} envelope and the
 	// handler unwraps payload.content + falls back to body-level task_id.
 	mux.Handle("POST /api/v1/tasks", withAuth(http.HandlerFunc(taskV2Handler.HandleCompleteTaskStep)))
+
 	mux.Handle("GET /api/v1/hscodes", withAuth(http.HandlerFunc(hsCodeRouter.HandleGetAll)))
 	mux.Handle("GET /api/v1/chas", withAuth(http.HandlerFunc(chaHandler.HandleGetCHAs)))
 	mux.Handle("GET /api/v1/companies", withAuth(http.HandlerFunc(companyHandler.HandleGetCompanies)))
@@ -268,6 +292,9 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		mux.HandleFunc("GET /api/v1/storage/{key}/content", storageHandler.DownloadContent)
 	}
 
+	// -------------------------------------------------------------------
+	// Stage 10: Server Instantiation & Close Hook
+	// -------------------------------------------------------------------
 	handler := middleware.CORS(&cfg.CORS)(mux)
 
 	server := &http.Server{
@@ -300,4 +327,37 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		NotificationManager: notificationManager,
 		close:               closeFn,
 	}, nil
+}
+
+// initTaskV2 consolidates Task V2 engine registrations, remote configs, and wiring.
+func initTaskV2(
+	db *gorm.DB,
+	temporalClient client.Client,
+	paymentService payments.PaymentService,
+	templateRegistry *registry.InMemRegistry,
+	cfg *config.Config,
+	onTaskCompleted func(string, string, string, map[string]any) error,
+) (*taskv2.WireResult, func() error, error) {
+	// Initialize outbound HTTP caller configurations
+	remoteManager := remote.NewManager()
+	if err := remoteManager.LoadServices(cfg.Server.ServicesConfigPath); err != nil {
+		return nil, nil, fmt.Errorf("failed to load remote services from %s: %w", cfg.Server.ServicesConfigPath, err)
+	}
+
+	// Instantiate flow plugins registry
+	pluginsRegistry := flowplugins.NewRegistry()
+	if err := taskv2plugins.Register(pluginsRegistry, remoteManager, paymentService, cfg.Server.ServiceURL, cfg.Server.Debug); err != nil {
+		return nil, nil, fmt.Errorf("failed to register taskv2 plugins: %w", err)
+	}
+
+	// Construct UI projectors
+	projectors := append(uiprojector.DefaultProjectors(), taskrenderer.NewPaymentProjector(paymentService))
+
+	// Wire Task V2 orchestration nodes and workers
+	taskV2, stopTaskV2, err := taskv2.WireTaskV2(db, temporalClient, pluginsRegistry, templateRegistry, projectors, onTaskCompleted)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to wire taskv2: %w", err)
+	}
+
+	return taskV2, stopTaskV2, nil
 }

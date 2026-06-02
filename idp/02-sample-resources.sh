@@ -1,0 +1,1355 @@
+#!/bin/bash
+
+set -e
+
+# Source common functions from the same directory as this script
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]:-$0}")"
+source "${SCRIPT_DIR}/common.sh"
+
+# Load .env values when available (useful for local execution).
+ENV_FILE="${SCRIPT_DIR}/.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+fi
+
+SAMPLE_USER_PASSWORD="${THUNDER_SAMPLE_USER_PASSWORD:-1234}"
+SURESH_PASSWORD="${THUNDER_SAMPLE_SURESH_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+RAMESH_PASSWORD="${THUNDER_SAMPLE_RAMESH_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+GOMESH_PASSWORD="${THUNDER_SAMPLE_GOMESH_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+NARESH_PASSWORD="${THUNDER_SAMPLE_NARESH_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+NPQS_USER_PASSWORD="${THUNDER_SAMPLE_NPQS_USER_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+FCAU_USER_PASSWORD="${THUNDER_SAMPLE_FCAU_USER_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+IRD_USER_PASSWORD="${THUNDER_SAMPLE_IRD_USER_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+CDA_USER_PASSWORD="${THUNDER_SAMPLE_CDA_USER_PASSWORD:-${SAMPLE_USER_PASSWORD}}"
+M2M_CLIENT_SECRET="${THUNDER_M2M_CLIENT_SECRET:-1234}"
+NPQS_M2M_CLIENT_SECRET="${THUNDER_M2M_NPQS_SECRET:-${M2M_CLIENT_SECRET}}"
+FCAU_M2M_CLIENT_SECRET="${THUNDER_M2M_FCAU_SECRET:-${M2M_CLIENT_SECRET}}"
+IRD_M2M_CLIENT_SECRET="${THUNDER_M2M_IRD_SECRET:-${M2M_CLIENT_SECRET}}"
+CDA_M2M_CLIENT_SECRET="${THUNDER_M2M_CDA_SECRET:-${M2M_CLIENT_SECRET}}"
+
+log_info "Creating sample Thunder resources..."
+echo ""
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+extract_first_id() {
+    echo "$1" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+get_user_id_by_username() {
+    local USERNAME="$1"
+    local RESPONSE HTTP_CODE BODY
+    RESPONSE=$(thunder_api_call GET "/users?limit=100&offset=0")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo ""
+        return
+    fi
+
+    # Parse one user object per line and locate matching username inside attributes.
+    echo "$BODY" | sed 's/},{/}\n{/g' | grep "\"username\":\"${USERNAME}\"" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+get_group_id_by_name() {
+    local GROUP_NAME="$1"
+    local OU_ID="$2"
+    local RESPONSE HTTP_CODE BODY
+    RESPONSE=$(thunder_api_call GET "/groups?limit=100&offset=0")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo ""
+        return
+    fi
+
+    echo "$BODY" | sed 's/},{/}\n{/g' | grep "\"name\":\"${GROUP_NAME}\"" | grep "\"ouId\":\"${OU_ID}\"" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+get_role_id_by_name() {
+    local ROLE_NAME="$1"
+    local OU_ID="$2"
+    local RESPONSE HTTP_CODE BODY
+    RESPONSE=$(thunder_api_call GET "/roles?limit=100&offset=0")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo ""
+        return
+    fi
+
+    echo "$BODY" | sed 's/},{/}\n{/g' | grep "\"name\":\"${ROLE_NAME}\"" | grep "\"ouId\":\"${OU_ID}\"" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+get_flow_id_by_handle() {
+    local FLOW_TYPE="$1"
+    local FLOW_HANDLE="$2"
+    local RESPONSE HTTP_CODE BODY
+    RESPONSE=$(thunder_api_call GET "/flows?limit=30&offset=0&flowType=${FLOW_TYPE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo ""
+        return
+    fi
+
+    echo "$BODY" | grep -o '{[^}]*"handle":"'"${FLOW_HANDLE}"'"[^}]*}' | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+get_application_id_by_client_id() {
+    local CLIENT_ID="$1"
+    local RESPONSE HTTP_CODE BODY
+    RESPONSE=$(thunder_api_call GET "/applications?limit=200&offset=0")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo ""
+        return
+    fi
+
+    echo "$BODY" | sed 's/},{/}\n{/g' | grep "\"clientId\":\"${CLIENT_ID}\"" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+get_ou_id_by_handle() {
+    local OU_HANDLE="$1"
+    local RESPONSE HTTP_CODE BODY
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo ""
+        return
+    fi
+
+    extract_first_id "$BODY"
+}
+
+create_user_in_ou() {
+    local USER_TYPE="$1"
+    local OU_ID="$2"
+    local USERNAME="$3"
+    local EMAIL="$4"
+    local GIVEN_NAME="$5"
+    local FAMILY_NAME="$6"
+    local PASSWORD="$7"
+    local PHONE_NUMBER="$8"
+
+    local RESPONSE HTTP_CODE BODY USER_ID
+
+    read -r -d '' USER_PAYLOAD <<JSON || true
+{
+    "type": "${USER_TYPE}",
+    "ouId": "${OU_ID}",
+    "attributes": {
+        "username": "${USERNAME}",
+        "password": "${PASSWORD}",
+        "email": "${EMAIL}",
+        "given_name": "${GIVEN_NAME}",
+        "family_name": "${FAMILY_NAME}",
+        "phone_number": "${PHONE_NUMBER}"
+    }
+}
+JSON
+
+    RESPONSE=$(thunder_api_call POST "/users" "${USER_PAYLOAD}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+        log_success "User ${USERNAME} created successfully"
+        USER_ID=$(extract_first_id "$BODY")
+    elif [[ "$HTTP_CODE" == "409" ]]; then
+        log_warning "User ${USERNAME} already exists, retrieving ID..."
+        USER_ID=$(get_user_id_by_username "$USERNAME")
+    else
+        log_error "Failed to create user ${USERNAME} (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+
+    if [[ -z "$USER_ID" ]]; then
+        log_error "Could not determine user ID for ${USERNAME}"
+        exit 1
+    fi
+
+    log_info "${USERNAME} user ID: $USER_ID"
+    CREATED_USER_ID="$USER_ID"
+}
+
+create_spa_application() {
+    local APP_NAME="$1"
+    local APP_DESCRIPTION="$2"
+    local CLIENT_ID="$3"
+    local PORT="$4"
+    local ALLOWED_USER_TYPE="$5"
+    local OU_ID="$6"
+    local RESPONSE HTTP_CODE BODY
+    local APP_ID APP_CLIENT_ID
+
+    log_info "Creating ${APP_NAME} application..."
+
+    ADDITIONAL_FIELDS=""
+    if [[ -n "$CLASSIC_THEME_ID" ]]; then
+        ADDITIONAL_FIELDS="${ADDITIONAL_FIELDS}
+    \"themeId\": \"${CLASSIC_THEME_ID}\"," 
+    fi
+    if [[ -n "$AUTH_FLOW_ID" ]]; then
+        ADDITIONAL_FIELDS="${ADDITIONAL_FIELDS}
+    \"authFlowId\": \"${AUTH_FLOW_ID}\"," 
+    fi
+    if [[ -n "$REG_FLOW_ID" ]]; then
+        ADDITIONAL_FIELDS="${ADDITIONAL_FIELDS}
+    \"registrationFlowId\": \"${REG_FLOW_ID}\"," 
+    fi
+
+    read -r -d '' APP_PAYLOAD <<JSON || true
+{
+    "name": "${APP_NAME}",
+    "description": "${APP_DESCRIPTION}",${ADDITIONAL_FIELDS}
+    "ouId": "${OU_ID}",
+    "isRegistrationFlowEnabled": false,
+    "template": "react",
+    "logoUrl": "https://ssl.gstatic.com/docs/common/profile/kiwi_lg.png",
+    "assertion": {
+        "validityPeriod": 3600
+    },
+    "inboundAuthConfig": [
+        {
+            "type": "oauth2",
+            "config": {
+                "clientId": "${CLIENT_ID}",
+                "redirectUris": [
+                    "http://localhost:${PORT}",
+                    "https://localhost:${PORT}"
+                ],
+                "grantTypes": [
+                    "authorization_code",
+                    "refresh_token"
+                ],
+                "responseTypes": [
+                    "code"
+                ],
+                "tokenEndpointAuthMethod": "none",
+                "pkceRequired": true,
+                "publicClient": true,
+                "token": {
+                    "accessToken": {
+                        "validityPeriod": 3600,
+                        "userAttributes": [
+                            "email",
+                            "phone_number",
+                            "family_name",
+                            "given_name",
+                            "groups",
+                            "roles",
+                            "ouHandle",
+                            "ouId",
+                            "ouName",
+                            "username"
+                        ]
+                    },
+                    "idToken": {
+                        "validityPeriod": 3600,
+                        "userAttributes": [
+                            "email",
+                            "family_name",
+                            "given_name",
+                            "groups",
+                            "roles",
+                            "ouHandle",
+                            "ouId",
+                            "ouName",
+                            "username"
+                        ]
+                    }
+                },
+                "scopes": [
+                    "openid",
+                    "profile",
+                    "email",
+                    "group",
+                    "role",
+                    "ou"
+                ],
+                "userInfo": {
+                    "userAttributes": [
+                        "family_name",
+                        "given_name",
+                        "email"
+                    ]
+                },
+                "scopeClaims": {
+                    "profile": [
+                        "name",
+                        "given_name",
+                        "family_name"
+                    ],
+                    "email": [
+                        "email"
+                    ],
+                    "phone": [
+                        "phone_number"
+                    ],
+                    "group": [
+                        "groups"
+                    ],
+                    "ou": [
+                        "ouId",
+                        "ouHandle"
+                    ],
+                    "role": [
+                        "roles"
+                    ]
+                }
+            }
+        }
+    ],
+    "userAttributes": [
+        "given_name",
+        "family_name",
+        "email",
+        "groups",
+        "ouId",
+        "ouHandle",
+        "ouName",
+        "username"
+    ],
+    "allowedUserTypes": [
+        "${ALLOWED_USER_TYPE}"
+    ]
+}
+JSON
+
+    RESPONSE=$(thunder_api_call POST "/applications" "${APP_PAYLOAD}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+        log_success "${APP_NAME} application created successfully"
+        APP_ID=$(extract_first_id "$BODY")
+        APP_CLIENT_ID=$(echo "$BODY" | grep -o '"clientId":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [[ -n "$APP_ID" ]]; then
+            log_info "${APP_NAME} app ID: ${APP_ID}"
+        fi
+        if [[ -n "$APP_CLIENT_ID" ]]; then
+            log_info "${APP_NAME} client ID: ${APP_CLIENT_ID}"
+        fi
+    elif [[ "$HTTP_CODE" == "409" ]] || ([[ "$HTTP_CODE" == "400" ]] && [[ "$BODY" =~ (Application\ already\ exists|APP-1022) ]]); then
+        log_warning "${APP_NAME} application already exists, skipping"
+    else
+        log_error "Failed to create ${APP_NAME} application (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+}
+
+create_m2m_application() {
+    local APP_NAME="$1"
+    local APP_DESCRIPTION="$2"
+    local CLIENT_ID="$3"
+    local CLIENT_SECRET="$4"
+    local OU_ID="$5"
+    local RESPONSE HTTP_CODE BODY
+    local APP_ID APP_CLIENT_ID
+
+    log_info "Creating ${APP_NAME} M2M application..."
+
+    read -r -d '' APP_PAYLOAD <<JSON || true
+{
+    "name": "${APP_NAME}",
+    "description": "${APP_DESCRIPTION}",
+    "ouId": "${OU_ID}",
+    "isRegistrationFlowEnabled": false,
+    "assertion": {
+        "validityPeriod": 3600
+    },
+    "inboundAuthConfig": [
+        {
+            "type": "oauth2",
+            "config": {
+                "clientId": "${CLIENT_ID}",
+                "clientSecret": "${CLIENT_SECRET}",
+                "grantTypes": [
+                    "client_credentials"
+                ],
+                "tokenEndpointAuthMethod": "client_secret_basic",
+                "pkceRequired": false,
+                "publicClient": false,
+                "token": {
+                    "accessToken": {
+                        "validityPeriod": 3600
+                    }
+                }
+            }
+        }
+    ],
+    "allowedUserTypes": []
+}
+JSON
+
+    RESPONSE=$(thunder_api_call POST "/applications" "${APP_PAYLOAD}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+        log_success "${APP_NAME} M2M application created successfully"
+        APP_ID=$(extract_first_id "$BODY")
+        APP_CLIENT_ID=$(echo "$BODY" | grep -o '"clientId":"[^"]*"' | head -1 | cut -d'"' -f4)
+    elif [[ "$HTTP_CODE" == "409" ]] || ([[ "$HTTP_CODE" == "400" ]] && [[ "$BODY" =~ (Application\ already\ exists|APP-1022) ]]); then
+        log_warning "${APP_NAME} M2M application already exists, retrieving ID..."
+        APP_ID=$(get_application_id_by_client_id "$CLIENT_ID")
+        APP_CLIENT_ID="$CLIENT_ID"
+    else
+        log_error "Failed to create ${APP_NAME} M2M application (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+
+    if [[ -n "$APP_ID" ]]; then
+        log_info "${APP_NAME} M2M app ID: ${APP_ID}"
+    fi
+    if [[ -n "$APP_CLIENT_ID" ]]; then
+        log_info "${APP_NAME} M2M client ID: ${APP_CLIENT_ID}"
+    fi
+
+    CREATED_M2M_APP_ID="$APP_ID"
+}
+
+ensure_user_in_group() {
+    local GROUP_ID="$1"
+    local USER_ID="$2"
+    local GROUP_NAME="$3"
+    local USERNAME="$4"
+    local RESPONSE HTTP_CODE BODY
+
+    read -r -d '' MEMBERS_ADD_PAYLOAD <<JSON || true
+{
+    "members": [
+        {
+            "id": "${USER_ID}",
+            "type": "user"
+        }
+    ]
+}
+JSON
+
+    RESPONSE=$(thunder_api_call POST "/groups/${GROUP_ID}/members/add" "${MEMBERS_ADD_PAYLOAD}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "204" ]]; then
+        log_success "Added ${USERNAME} to group ${GROUP_NAME}"
+    elif [[ "$HTTP_CODE" == "409" ]]; then
+        log_warning "${USERNAME} is already a member of group ${GROUP_NAME}, skipping"
+    else
+        log_error "Failed to add ${USERNAME} to group ${GROUP_NAME} (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+}
+
+assign_role_to_group() {
+    local ROLE_ID="$1"
+    local GROUP_ID="$2"
+    local ROLE_NAME="$3"
+    local GROUP_NAME="$4"
+    local RESPONSE HTTP_CODE BODY
+    
+    # Check existing assignments first to avoid server-side unique constraint errors
+    RESPONSE=$(thunder_api_call GET "/roles/${ROLE_ID}/assignments?type=group")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        if echo "$BODY" | grep -q "\"id\":\"${GROUP_ID}\""; then
+            log_warning "Role ${ROLE_NAME} is already assigned to group ${GROUP_NAME}, skipping"
+            return
+        fi
+    fi
+
+    read -r -d '' ROLE_ASSIGNMENT_PAYLOAD <<JSON || true
+{
+    "assignments": [
+        {
+            "id": "${GROUP_ID}",
+            "type": "group"
+        }
+    ]
+}
+JSON
+
+    RESPONSE=$(thunder_api_call POST "/roles/${ROLE_ID}/assignments/add" "${ROLE_ASSIGNMENT_PAYLOAD}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "204" ]]; then
+        log_success "Assigned role ${ROLE_NAME} to group ${GROUP_NAME}"
+    elif [[ "$HTTP_CODE" == "409" ]]; then
+        log_warning "Role ${ROLE_NAME} is already assigned to group ${GROUP_NAME}, skipping"
+    elif [[ "$HTTP_CODE" == "500" ]]; then
+        if echo "$BODY" | grep -qi "UNIQUE constraint failed"; then
+            log_warning "Role ${ROLE_NAME} appears already assigned to group ${GROUP_NAME} (unique constraint), skipping"
+        else
+            log_error "Failed to assign role ${ROLE_NAME} to group ${GROUP_NAME} (HTTP $HTTP_CODE)"
+            echo "Response: $BODY"
+            exit 1
+        fi
+    else
+        log_error "Failed to assign role ${ROLE_NAME} to group ${GROUP_NAME} (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+}
+
+# ============================================================================
+# Create Private Sector Organization Unit
+# ============================================================================
+
+PRIVATE_SECTOR_OU_HANDLE="private-sector"
+
+log_info "Creating Private Sector organization unit..."
+
+read -r -d '' PRIVATE_SECTOR_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${PRIVATE_SECTOR_OU_HANDLE}",
+    "name": "Private Sector",
+    "description": "Organization unit for private sector entities"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${PRIVATE_SECTOR_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "Private Sector organization unit created successfully"
+    PRIVATE_SECTOR_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "Private Sector organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${PRIVATE_SECTOR_OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        PRIVATE_SECTOR_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch organization unit by handle '${PRIVATE_SECTOR_OU_HANDLE}' (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create Private Sector organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$PRIVATE_SECTOR_OU_ID" ]]; then
+    log_error "Could not determine Private Sector organization unit ID"
+    exit 1
+fi
+
+log_info "Private Sector OU ID: $PRIVATE_SECTOR_OU_ID"
+
+echo ""
+
+# ============================================================================
+# Create ADAM PVT LTD Child Organization Unit
+# ============================================================================
+
+ADAM_PVT_LTD_OU_HANDLE="adam-pvt-ltd"
+ADAM_PVT_LTD_OU_PATH="${PRIVATE_SECTOR_OU_HANDLE}/${ADAM_PVT_LTD_OU_HANDLE}"
+
+log_info "Creating ADAM PVT LTD child organization unit..."
+
+read -r -d '' ADAM_PVT_LTD_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${ADAM_PVT_LTD_OU_HANDLE}",
+    "name": "ADAM PVT LTD",
+    "description": "Child organization unit for ADAM PVT LTD",
+    "parent": "${PRIVATE_SECTOR_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${ADAM_PVT_LTD_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "ADAM PVT LTD organization unit created successfully"
+    ADAM_PVT_LTD_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "ADAM PVT LTD organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${ADAM_PVT_LTD_OU_PATH}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        ADAM_PVT_LTD_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch organization unit by path '${ADAM_PVT_LTD_OU_PATH}' (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create ADAM PVT LTD organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$ADAM_PVT_LTD_OU_ID" ]]; then
+    log_error "Could not determine ADAM PVT LTD organization unit ID"
+    exit 1
+fi
+
+log_info "ADAM PVT LTD OU ID: $ADAM_PVT_LTD_OU_ID"
+
+echo ""
+
+# ============================================================================
+# Create EDWARD PVT LTD Child Organization Unit
+# ============================================================================
+
+EDWARD_PVT_LTD_OU_HANDLE="edward-pvt-ltd"
+EDWARD_PVT_LTD_OU_PATH="${PRIVATE_SECTOR_OU_HANDLE}/${EDWARD_PVT_LTD_OU_HANDLE}"
+
+log_info "Creating EDWARD PVT LTD child organization unit..."
+
+read -r -d '' EDWARD_PVT_LTD_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${EDWARD_PVT_LTD_OU_HANDLE}",
+    "name": "EDWARD PVT LTD",
+    "description": "Child organization unit for EDWARD PVT LTD",
+    "parent": "${PRIVATE_SECTOR_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${EDWARD_PVT_LTD_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "EDWARD PVT LTD organization unit created successfully"
+    EDWARD_PVT_LTD_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "EDWARD PVT LTD organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${EDWARD_PVT_LTD_OU_PATH}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        EDWARD_PVT_LTD_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch organization unit by path '${EDWARD_PVT_LTD_OU_PATH}' (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create EDWARD PVT LTD organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$EDWARD_PVT_LTD_OU_ID" ]]; then
+    log_error "Could not determine EDWARD PVT LTD organization unit ID"
+    exit 1
+fi
+
+log_info "EDWARD PVT LTD OU ID: $EDWARD_PVT_LTD_OU_ID"
+
+echo ""
+
+# ============================================================================
+# Create Government Organization and Child OUs
+# ============================================================================
+
+GOVERNMENT_ORG_OU_HANDLE="government-organization"
+NPQS_OU_HANDLE="npqs"
+FCAU_OU_HANDLE="fcau"
+IRD_OU_HANDLE="ird"
+CDA_OU_HANDLE="cda"
+
+log_info "Creating Government Organization root organization unit..."
+
+read -r -d '' GOVERNMENT_ORG_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${GOVERNMENT_ORG_OU_HANDLE}",
+    "name": "Government Organization",
+    "description": "Root organization unit for government entities"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${GOVERNMENT_ORG_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "Government Organization created successfully"
+    GOVERNMENT_ORG_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "Government Organization already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${GOVERNMENT_ORG_OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        GOVERNMENT_ORG_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch organization unit by path '${GOVERNMENT_ORG_OU_HANDLE}' (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create Government Organization (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$GOVERNMENT_ORG_OU_ID" ]]; then
+    log_error "Could not determine Government Organization ID"
+    exit 1
+fi
+
+log_info "Government Organization OU ID: $GOVERNMENT_ORG_OU_ID"
+
+echo ""
+log_info "Creating NPQS organization unit..."
+
+read -r -d '' NPQS_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${NPQS_OU_HANDLE}",
+    "name": "NPQS",
+    "description": "National Plant Quarantine Service",
+    "parent": "${GOVERNMENT_ORG_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${NPQS_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "NPQS organization unit created successfully"
+    NPQS_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "NPQS organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${GOVERNMENT_ORG_OU_HANDLE}/${NPQS_OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        NPQS_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch NPQS OU (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create NPQS organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$NPQS_OU_ID" ]]; then
+    log_error "Could not determine NPQS organization unit ID"
+    exit 1
+fi
+
+log_info "NPQS OU ID: $NPQS_OU_ID"
+
+echo ""
+log_info "Creating FCAU organization unit..."
+
+read -r -d '' FCAU_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${FCAU_OU_HANDLE}",
+    "name": "FCAU",
+    "description": "Food Control Administration Unit",
+    "parent": "${GOVERNMENT_ORG_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${FCAU_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "FCAU organization unit created successfully"
+    FCAU_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "FCAU organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${GOVERNMENT_ORG_OU_HANDLE}/${FCAU_OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        FCAU_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch FCAU OU (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create FCAU organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$FCAU_OU_ID" ]]; then
+    log_error "Could not determine FCAU organization unit ID"
+    exit 1
+fi
+
+log_info "FCAU OU ID: $FCAU_OU_ID"
+
+echo ""
+log_info "Creating IRD organization unit..."
+
+read -r -d '' IRD_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${IRD_OU_HANDLE}",
+    "name": "IRD",
+    "description": "Inland Revenue Department",
+    "parent": "${GOVERNMENT_ORG_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${IRD_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "IRD organization unit created successfully"
+    IRD_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "IRD organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${GOVERNMENT_ORG_OU_HANDLE}/${IRD_OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        IRD_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch IRD OU (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create IRD organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$IRD_OU_ID" ]]; then
+    log_error "Could not determine IRD organization unit ID"
+    exit 1
+fi
+
+log_info "IRD OU ID: $IRD_OU_ID"
+
+echo ""
+log_info "Creating CDA organization unit..."
+
+read -r -d '' CDA_OU_PAYLOAD <<JSON || true
+{
+    "handle": "${CDA_OU_HANDLE}",
+    "name": "CDA",
+    "description": "Coconut Development Authority",
+    "parent": "${GOVERNMENT_ORG_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/organization-units" "${CDA_OU_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "CDA organization unit created successfully"
+    CDA_OU_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "CDA organization unit already exists, retrieving ID..."
+    RESPONSE=$(thunder_api_call GET "/organization-units/tree/${GOVERNMENT_ORG_OU_HANDLE}/${CDA_OU_HANDLE}")
+    HTTP_CODE="${RESPONSE: -3}"
+    BODY="${RESPONSE%???}"
+
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        CDA_OU_ID=$(extract_first_id "$BODY")
+    else
+        log_error "Failed to fetch CDA OU (HTTP $HTTP_CODE)"
+        echo "Response: $BODY"
+        exit 1
+    fi
+else
+    log_error "Failed to create CDA organization unit (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$CDA_OU_ID" ]]; then
+    log_error "Could not determine CDA organization unit ID"
+    exit 1
+fi
+
+log_info "CDA OU ID: $CDA_OU_ID"
+
+echo ""
+
+# ============================================================================
+# Create Private_User User Type
+# ============================================================================
+
+log_info "Creating Private_User user type..."
+
+read -r -d '' PRIVATE_USER_TYPE_PAYLOAD <<JSON || true
+{
+    "name": "Private_User",
+    "ouId": "${PRIVATE_SECTOR_OU_ID}",
+    "allowSelfRegistration": false,
+    "schema": {
+        "username": {
+            "type": "string",
+            "required": true,
+            "unique": true
+        },
+        "password": {
+            "type": "string",
+            "required": true,
+            "credential": true
+        },
+        "email": {
+            "type": "string",
+            "required": true,
+            "unique": true,
+            "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}$"
+        },
+        "phone_number": {
+            "type": "string",
+            "required": false,
+            "regex": "^\\\\+?[1-9]\\\\d{1,14}$"
+        },
+        "given_name": {
+            "type": "string",
+            "required": false
+        },
+        "family_name": {
+            "type": "string",
+            "required": false
+        }
+    },
+    "systemAttributes": {
+        "display": "username"
+    }
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/user-schemas" "${PRIVATE_USER_TYPE_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "Private_User user type created successfully"
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "Private_User user type already exists, skipping"
+else
+    log_error "Failed to create Private_User user type (HTTP $HTTP_CODE)"
+    exit 1
+fi
+
+echo ""
+
+# ============================================================================
+# Create Government_User User Type
+# ============================================================================
+
+log_info "Creating Government_User user type..."
+
+read -r -d '' GOVERNMENT_USER_TYPE_PAYLOAD <<JSON || true
+{
+    "name": "Government_User",
+    "ouId": "${GOVERNMENT_ORG_OU_ID}",
+    "allowSelfRegistration": false,
+    "schema": {
+        "username": {
+            "type": "string",
+            "required": true,
+            "unique": true
+        },
+        "password": {
+            "type": "string",
+            "required": true,
+            "credential": true
+        },
+        "email": {
+            "type": "string",
+            "required": true,
+            "unique": true,
+            "regex": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}$"
+        },
+        "phone_number": {
+            "type": "string",
+            "required": false
+        },
+        "given_name": {
+            "type": "string",
+            "required": false
+        },
+        "family_name": {
+            "type": "string",
+            "required": false
+        }
+    },
+    "systemAttributes": {
+        "display": "username"
+    }
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/user-schemas" "${GOVERNMENT_USER_TYPE_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+        log_success "Government_User user type created successfully"
+elif [[ "$HTTP_CODE" == "409" ]]; then
+        log_warning "Government_User user type already exists, skipping"
+else
+        log_error "Failed to create Government_User user type (HTTP $HTTP_CODE)"
+        exit 1
+fi
+
+echo ""
+
+# ============================================================================
+# Create Groups (Traders, CHA)
+# ============================================================================
+
+log_info "Creating Traders group..."
+
+read -r -d '' TRADERS_GROUP_PAYLOAD <<JSON || true
+{
+    "name": "Traders",
+    "description": "Trader members group",
+    "ouId": "${PRIVATE_SECTOR_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/groups" "${TRADERS_GROUP_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "Traders group created successfully"
+    TRADERS_GROUP_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "Traders group already exists, retrieving ID..."
+    TRADERS_GROUP_ID=$(get_group_id_by_name "Traders" "$PRIVATE_SECTOR_OU_ID")
+else
+    log_error "Failed to create Traders group (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$TRADERS_GROUP_ID" ]]; then
+    log_error "Could not determine Traders group ID"
+    exit 1
+fi
+
+log_info "Traders group ID: $TRADERS_GROUP_ID"
+
+echo ""
+
+# ============================================================================
+# Create CHA Group
+# ============================================================================
+
+log_info "Creating CHA group..."
+
+read -r -d '' CHA_GROUP_PAYLOAD <<JSON || true
+{
+    "name": "CHA",
+    "description": "CHA members group",
+    "ouId": "${PRIVATE_SECTOR_OU_ID}"
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/groups" "${CHA_GROUP_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "CHA group created successfully"
+    CHA_GROUP_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "CHA group already exists, retrieving ID..."
+    CHA_GROUP_ID=$(get_group_id_by_name "CHA" "$PRIVATE_SECTOR_OU_ID")
+else
+    log_error "Failed to create CHA group (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$CHA_GROUP_ID" ]]; then
+    log_error "Could not determine CHA group ID"
+    exit 1
+fi
+
+log_info "CHA group ID: $CHA_GROUP_ID"
+
+echo ""
+
+# ============================================================================
+# Create Roles (Trader, CHA)
+# ============================================================================
+
+log_info "Creating Trader role..."
+
+read -r -d '' TRADER_ROLE_PAYLOAD <<JSON || true
+{
+    "name": "Trader",
+    "description": "Role for trader operations",
+    "ouId": "${PRIVATE_SECTOR_OU_ID}",
+    "permissions": []
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/roles" "${TRADER_ROLE_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "Trader role created successfully"
+    TRADER_ROLE_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "Trader role already exists, retrieving ID..."
+    TRADER_ROLE_ID=$(get_role_id_by_name "Trader" "$PRIVATE_SECTOR_OU_ID")
+else
+    log_error "Failed to create Trader role (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$TRADER_ROLE_ID" ]]; then
+    log_error "Could not determine Trader role ID"
+    exit 1
+fi
+
+log_info "Trader role ID: $TRADER_ROLE_ID"
+
+echo ""
+log_info "Creating CHA role..."
+
+read -r -d '' CHA_ROLE_PAYLOAD <<JSON || true
+{
+    "name": "CHA",
+    "description": "Role for CHA operations",
+    "ouId": "${PRIVATE_SECTOR_OU_ID}",
+    "permissions": []
+}
+JSON
+
+RESPONSE=$(thunder_api_call POST "/roles" "${CHA_ROLE_PAYLOAD}")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "200" ]]; then
+    log_success "CHA role created successfully"
+    CHA_ROLE_ID=$(extract_first_id "$BODY")
+elif [[ "$HTTP_CODE" == "409" ]]; then
+    log_warning "CHA role already exists, retrieving ID..."
+    CHA_ROLE_ID=$(get_role_id_by_name "CHA" "$PRIVATE_SECTOR_OU_ID")
+else
+    log_error "Failed to create CHA role (HTTP $HTTP_CODE)"
+    echo "Response: $BODY"
+    exit 1
+fi
+
+if [[ -z "$CHA_ROLE_ID" ]]; then
+    log_error "Could not determine CHA role ID"
+    exit 1
+fi
+
+log_info "CHA role ID: $CHA_ROLE_ID"
+
+echo ""
+
+# ============================================================================
+# Assign Roles to Groups
+# ============================================================================
+
+log_info "Assigning roles to groups..."
+assign_role_to_group "$TRADER_ROLE_ID" "$TRADERS_GROUP_ID" "Trader" "Traders"
+assign_role_to_group "$CHA_ROLE_ID" "$CHA_GROUP_ID" "CHA" "CHA"
+
+echo ""
+
+# ============================================================================
+# Create Users in ADAM PVT LTD OU
+# ============================================================================
+
+log_info "Creating sample users..."
+
+create_user_in_ou "Private_User" "$ADAM_PVT_LTD_OU_ID" "suresh" "suresh@adam-pvt-ltd.private-sector.dev" "Suresh" "Fernando" "$SURESH_PASSWORD" "+94771234567"
+USER_SURESH="$CREATED_USER_ID"
+
+create_user_in_ou "Private_User" "$ADAM_PVT_LTD_OU_ID" "ramesh" "ramesh@adam-pvt-ltd.private-sector.dev" "Ramesh" "Fernando" "$RAMESH_PASSWORD" "+94771234568"
+USER_RAMESH="$CREATED_USER_ID"
+
+create_user_in_ou "Private_User" "$ADAM_PVT_LTD_OU_ID" "gomesh" "gomesh@adam-pvt-ltd.private-sector.dev" "Gomesh" "Fernando" "$GOMESH_PASSWORD" "+94771234569"
+USER_GOMESH="$CREATED_USER_ID"
+
+create_user_in_ou "Private_User" "$EDWARD_PVT_LTD_OU_ID" "naresh" "naresh@edward-pvt-ltd.private-sector.dev" "Naresh" "Fernando" "$NARESH_PASSWORD" "+94771234570"
+USER_NARESH="$CREATED_USER_ID"
+
+create_user_in_ou "Government_User" "$NPQS_OU_ID" "npqs_user" "npqs_user@government.dev" "NPQS" "User" "$NPQS_USER_PASSWORD" "+94771234560"
+USER_NPQS_ID="$CREATED_USER_ID"
+
+create_user_in_ou "Government_User" "$FCAU_OU_ID" "fcau_user" "fcau_user@government.dev" "FCAU" "User" "$FCAU_USER_PASSWORD" "+94771234561"
+USER_FCAU_ID="$CREATED_USER_ID"
+
+create_user_in_ou "Government_User" "$IRD_OU_ID" "ird_user" "ird_user@government.dev" "IRD" "User" "$IRD_USER_PASSWORD" "+94771234562"
+USER_IRD_ID="$CREATED_USER_ID"
+
+create_user_in_ou "Government_User" "$CDA_OU_ID" "cda_user" "cda_user@government.dev" "CDA" "User" "$CDA_USER_PASSWORD" "+94771234563"
+USER_CDA_ID="$CREATED_USER_ID"
+
+echo ""
+
+# ============================================================================
+# Assign Users to Groups (Role inheritance is group-based)
+# ============================================================================
+
+log_info "Assigning users to groups..."
+
+ensure_user_in_group "$TRADERS_GROUP_ID" "$USER_SURESH" "Traders" "suresh"
+ensure_user_in_group "$CHA_GROUP_ID" "$USER_SURESH" "CHA" "suresh"
+ensure_user_in_group "$CHA_GROUP_ID" "$USER_RAMESH" "CHA" "ramesh"
+ensure_user_in_group "$TRADERS_GROUP_ID" "$USER_GOMESH" "Traders" "gomesh"
+ensure_user_in_group "$CHA_GROUP_ID" "$USER_NARESH" "CHA" "naresh"
+
+echo ""
+
+# ============================================================================
+# Fetch Theme and Flow IDs (optional)
+# ============================================================================
+
+log_info "Fetching Classic theme and default flows..."
+
+CLASSIC_THEME_ID=""
+RESPONSE=$(thunder_api_call GET "/design/themes")
+HTTP_CODE="${RESPONSE: -3}"
+BODY="${RESPONSE%???}"
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+    CLASSIC_THEME_ID=$(echo "$BODY" | grep -o '{[^}]*"displayName":"Classic"[^}]*}' | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [[ -n "$CLASSIC_THEME_ID" ]]; then
+        log_success "Found Classic theme ID: $CLASSIC_THEME_ID"
+    else
+        log_warning "Classic theme not found; app creation will continue without theme_id"
+    fi
+else
+    log_warning "Failed to fetch themes (HTTP $HTTP_CODE); app creation will continue without theme_id"
+fi
+
+AUTH_FLOW_ID=$(get_flow_id_by_handle "AUTHENTICATION" "default-basic-flow")
+REG_FLOW_ID=$(get_flow_id_by_handle "REGISTRATION" "default-basic-flow")
+
+if [[ -n "$AUTH_FLOW_ID" ]]; then
+    log_success "Found default authentication flow ID: $AUTH_FLOW_ID"
+else
+    log_warning "Default authentication flow not found; app creation will continue without auth_flow_id"
+fi
+
+if [[ -n "$REG_FLOW_ID" ]]; then
+    log_success "Found default registration flow ID: $REG_FLOW_ID"
+else
+    log_warning "Default registration flow not found; app creation will continue without registration_flow_id"
+fi
+
+echo ""
+
+# ============================================================================
+# Create SPA Applications
+# ============================================================================
+
+# Retrieve OU IDs for SPA applications
+echo "Fetching OU IDs for SPA applications..."
+DEFAULT_OU_ID_FOR_TRADER=$(get_ou_id_by_handle "default")
+NPQS_OU_ID_FOR_APP=$(get_ou_id_by_handle "government-organization/npqs")
+FCAU_OU_ID_FOR_APP=$(get_ou_id_by_handle "government-organization/fcau")
+IRD_OU_ID_FOR_APP=$(get_ou_id_by_handle "government-organization/ird")
+CDA_OU_ID_FOR_APP=$(get_ou_id_by_handle "government-organization/cda")
+
+create_spa_application "TraderApp" "Application for trader portal built with React" "TRADER_PORTAL_APP" "5173" "Private_User" "${DEFAULT_OU_ID_FOR_TRADER}"
+create_spa_application "NPQSPortalApp" "Application for NPQS portal built with React" "OGA_PORTAL_APP_NPQS" "5174" "Government_User" "${NPQS_OU_ID_FOR_APP}"
+create_spa_application "FCAUPortalApp" "Application for FCAU portal built with React" "OGA_PORTAL_APP_FCAU" "5175" "Government_User" "${FCAU_OU_ID_FOR_APP}"
+create_spa_application "IRDPortalApp" "Application for IRD portal built with React" "OGA_PORTAL_APP_IRD" "5176" "Government_User" "${IRD_OU_ID_FOR_APP}"
+create_spa_application "CDAPortalApp" "Application for CDA portal built with React" "OGA_PORTAL_APP_CDA" "5177" "Government_User" "${CDA_OU_ID_FOR_APP}"
+
+echo ""
+
+# ============================================================================
+# Resolve Default Organization Unit for M2M Applications
+# ============================================================================
+
+DEFAULT_OU_HANDLE="default"
+log_info "Resolving Default organization unit for M2M applications..."
+
+DEFAULT_OU_ID_FOR_M2M=$(get_ou_id_by_handle "${DEFAULT_OU_HANDLE}")
+
+if [[ -z "$DEFAULT_OU_ID_FOR_M2M" ]]; then
+    log_error "Could not determine Default organization unit ID for M2M applications"
+    exit 1
+fi
+
+log_info "Default organization unit ID for M2M: ${DEFAULT_OU_ID_FOR_M2M}"
+
+echo ""
+
+# ============================================================================
+# Create M2M Applications for external services calling NSW APIs
+# ============================================================================
+
+create_m2m_application "NPQS_TO_NSW_M2M" "Machine-to-machine integration for NPQS to NSW" "NPQS_TO_NSW" "${NPQS_M2M_CLIENT_SECRET}" "${DEFAULT_OU_ID_FOR_M2M}"
+NPQS_TO_NSW_M2M_APP_ID="$CREATED_M2M_APP_ID"
+
+create_m2m_application "FCAU_TO_NSW_M2M" "Machine-to-machine integration for FCAU to NSW" "FCAU_TO_NSW" "${FCAU_M2M_CLIENT_SECRET}" "${DEFAULT_OU_ID_FOR_M2M}"
+FCAU_TO_NSW_M2M_APP_ID="$CREATED_M2M_APP_ID"
+
+create_m2m_application "IRD_TO_NSW_M2M" "Machine-to-machine integration for IRD to NSW" "IRD_TO_NSW" "${IRD_M2M_CLIENT_SECRET}" "${DEFAULT_OU_ID_FOR_M2M}"
+IRD_TO_NSW_M2M_APP_ID="$CREATED_M2M_APP_ID"
+
+create_m2m_application "CDA_TO_NSW_M2M" "Machine-to-machine integration for CDA to NSW" "CDA_TO_NSW" "${CDA_M2M_CLIENT_SECRET}" "${DEFAULT_OU_ID_FOR_M2M}"
+CDA_TO_NSW_M2M_APP_ID="$CREATED_M2M_APP_ID"
+
+echo ""
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+log_success "Sample resources setup completed successfully!"
+log_info "Private Sector OU path: ${PRIVATE_SECTOR_OU_HANDLE}"
+log_info "ADAM PVT LTD OU path: ${ADAM_PVT_LTD_OU_PATH}"
+log_info "EDWARD PVT LTD OU path: ${EDWARD_PVT_LTD_OU_PATH}"
+log_info "Government Organization OU path: ${GOVERNMENT_ORG_OU_HANDLE}"
+log_info "Government child OUs: ${NPQS_OU_HANDLE}, ${FCAU_OU_HANDLE}, ${IRD_OU_HANDLE}, ${CDA_OU_HANDLE}"
+log_info "Private user type: Private_User"
+log_info "Government user type: Government_User"
+log_info "Traders group -> Trader role"
+log_info "CHA group -> CHA role"
+log_info "suresh in groups: Traders, CHA"
+log_info "ramesh in groups: CHA"
+log_info "gomesh in groups: Traders"
+log_info "naresh (EDWARD PVT LTD) in groups: CHA"
+log_info "Government users: npqs_user, fcau_user, ird_user, cda_user"
+log_info "App client IDs: TRADER_PORTAL_APP, OGA_PORTAL_APP_NPQS, OGA_PORTAL_APP_FCAU, OGA_PORTAL_APP_IRD, OGA_PORTAL_APP_CDA"
+log_info "M2M client IDs: NPQS_TO_NSW, FCAU_TO_NSW, IRD_TO_NSW, CDA_TO_NSW"
+log_info "M2M auth method: client_secret_basic"
+echo ""

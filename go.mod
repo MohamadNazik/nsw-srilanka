@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/OpenNSW/go-temporal-workflow v0.4.0
-	github.com/OpenNSW/nsw-task-flow v0.0.0-20260524054242-b39430bb2b1e
+	github.com/OpenNSW/nsw-task-flow v0.0.0-20260526134015-a84391d97c36
 	github.com/OpenNSW/nsw/backend v0.0.0-20260529071214-3c79b8bd53d5
 )
 

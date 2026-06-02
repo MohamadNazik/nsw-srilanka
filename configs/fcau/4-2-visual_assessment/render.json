@@ -1,0 +1,25 @@
+{
+  "id": "fcau-visual-assessment-flow:render",
+  "type": "VISUAL_ASSESSMENT",
+  "sections": {
+    "status_message": {
+      "templateId": "fcau-visual-assessment--reviewer-instructions",
+      "title": "Assessment Instructions",
+      "projector": "MARKDOWN",
+      "visibleWhen": {
+        "states": [
+          "QUEUED_EXTERNALLY"
+        ]
+      }
+    },
+    "officerform": {
+      "templateId": "fcau-visual-assessment--reviewer-form",
+      "title": "Visual Sample Assessment",
+      "projector": "FORM",
+      "dataKey": "reviewerform",
+      "visibleWhen": {
+        "requireDataKey": "reviewerform"
+      }
+    }
+  }
+}
