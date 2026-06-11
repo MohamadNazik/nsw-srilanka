@@ -33,6 +33,12 @@ export function ConsignmentScreen() {
 
   const listRequestIdRef = useRef(0)
 
+  const [prevDebouncedSearchQuery, setPrevDebouncedSearchQuery] = useState(debouncedSearchQuery)
+  if (debouncedSearchQuery !== prevDebouncedSearchQuery) {
+    setPrevDebouncedSearchQuery(debouncedSearchQuery)
+    setPage(0)
+  }
+
   const handleCreateConsignment = async () => {
     setCreating(true)
     try {
@@ -44,10 +50,6 @@ export function ConsignmentScreen() {
       setCreating(false)
     }
   }
-
-  useEffect(() => {
-    setPage(0)
-  }, [debouncedSearchQuery])
 
   useEffect(() => {
     async function fetchConsignments() {
