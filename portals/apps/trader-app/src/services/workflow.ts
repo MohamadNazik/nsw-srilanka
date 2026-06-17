@@ -38,7 +38,7 @@ async function fetchWorkflowByType(hsCode: string, tradeFlow: 'IMPORT' | 'EXPORT
       steps: template.steps,
     }
   } catch (error) {
-    if (error instanceof Error && error.message.includes('404')) {
+    if (error instanceof Error && error.message.includes('status: 404')) {
       return null
     }
     throw error

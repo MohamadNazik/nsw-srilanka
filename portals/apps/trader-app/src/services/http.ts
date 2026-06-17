@@ -47,13 +47,13 @@ export const http = {
     })
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
+      const errorText = await response.text().catch(() => '')
+      throw new Error(`HTTP error! status: ${response.status}${errorText ? ` - ${errorText}` : ''}`)
     }
 
+    const text = await response.text()
     const contentType = response.headers.get('content-type')
-    const data = (
-      contentType && contentType.includes('application/json') ? await response.json() : await response.text()
-    ) as unknown
+    const data = (contentType?.includes('application/json') && text ? (JSON.parse(text) as unknown) : text) as unknown
 
     return { data }
   },

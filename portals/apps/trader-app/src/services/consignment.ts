@@ -28,7 +28,7 @@ export async function getConsignment(id: string): Promise<Consignment | null> {
     })
     return data as Consignment
   } catch (error) {
-    if (error instanceof Error && error.message.includes('404')) {
+    if (error instanceof Error && error.message.includes('status: 404')) {
       return null
     }
     throw error
