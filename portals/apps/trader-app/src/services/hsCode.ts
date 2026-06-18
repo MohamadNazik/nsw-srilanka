@@ -1,8 +1,6 @@
 import { http } from './http'
-import { API_BASE_URL, API_PATH_PREFIX } from '../constants'
+import { API_BASE_URL } from '../constants'
 import type { HSCodeListResult, HSCodeQueryParams } from './types/hsCode'
-
-const BASE = `${API_BASE_URL}${API_PATH_PREFIX}`
 
 export async function getHSCodes(params: HSCodeQueryParams = {}): Promise<HSCodeListResult> {
   const queryParams: Record<string, string | number> = {}
@@ -11,7 +9,7 @@ export async function getHSCodes(params: HSCodeQueryParams = {}): Promise<HSCode
   if (params.offset !== undefined) queryParams.offset = params.offset
 
   const { data } = await http.request({
-    url: `${BASE}/hscodes`,
+    url: `${API_BASE_URL}/api/v1/hscodes`,
     params: queryParams,
     attachToken: true,
   })

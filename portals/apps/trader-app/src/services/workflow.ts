@@ -1,14 +1,11 @@
-import { http } from './http'
-import { API_BASE_URL, API_PATH_PREFIX } from '../constants'
+import { http, HttpError } from './http'
+import { API_BASE_URL } from '../constants'
 import type { Workflow, WorkflowTemplate, WorkflowQueryParams } from './types/workflow'
 
 export interface WorkflowResponse {
   import: Workflow[]
   export: Workflow[]
 }
-
-const BASE = `${API_BASE_URL}${API_PATH_PREFIX}`
-const WORKFLOW_TEMPLATES_URL = `${BASE}/workflows/templates`
 
 export async function getWorkflowsByHSCode(params: WorkflowQueryParams): Promise<WorkflowResponse> {
   const [importWorkflow, exportWorkflow] = await Promise.all([
@@ -25,7 +22,7 @@ export async function getWorkflowsByHSCode(params: WorkflowQueryParams): Promise
 async function fetchWorkflowByType(hsCode: string, tradeFlow: 'IMPORT' | 'EXPORT'): Promise<Workflow | null> {
   try {
     const { data } = await http.request({
-      url: WORKFLOW_TEMPLATES_URL,
+      url: `${API_BASE_URL}/api/v1/workflows/templates`,
       params: { hsCode, tradeFlow },
       attachToken: true,
     })
@@ -38,7 +35,7 @@ async function fetchWorkflowByType(hsCode: string, tradeFlow: 'IMPORT' | 'EXPORT
       steps: template.steps,
     }
   } catch (error) {
-    if (error instanceof Error && error.message.includes('status: 404')) {
+    if (error instanceof HttpError && error.status === 404) {
       return null
     }
     throw error
@@ -47,7 +44,7 @@ async function fetchWorkflowByType(hsCode: string, tradeFlow: 'IMPORT' | 'EXPORT
 
 export async function getWorkflowById(id: string): Promise<Workflow | undefined> {
   const { data } = await http.request({
-    url: `${BASE}/workflows/${id}`,
+    url: `${API_BASE_URL}/api/v1/workflows/${id}`,
     attachToken: true,
   })
   return data as Workflow

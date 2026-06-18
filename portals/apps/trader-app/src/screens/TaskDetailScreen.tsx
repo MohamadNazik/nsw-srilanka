@@ -131,7 +131,7 @@ export function TaskDetailScreen() {
           if (!taskId) return
           setSubmitError(null)
           try {
-            await submitTaskStep(taskId, data)
+            await submitTaskStep(taskId, command, data)
             await new Promise((resolve) => setTimeout(resolve, POST_SUBMIT_REFETCH_DELAY_MS))
             await fetchTask()
           } catch (err) {

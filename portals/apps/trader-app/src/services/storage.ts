@@ -1,5 +1,5 @@
 import { http } from './http'
-import { API_BASE_URL, API_PATH_PREFIX } from '../constants'
+import { API_BASE_URL } from '../constants'
 
 interface UploadMetadataRequest {
   filename: string
@@ -23,11 +23,9 @@ export interface UploadResponse {
   name: string
 }
 
-const BASE = `${API_BASE_URL}${API_PATH_PREFIX}`
-
 export async function uploadFile(file: File): Promise<UploadResponse> {
   const { data } = await http.request({
-    url: `${BASE}/storage`,
+    url: `${API_BASE_URL}/api/v1/storage`,
     method: 'POST',
     data: {
       filename: file.name,
@@ -56,7 +54,7 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
 
 export async function getDownloadUrl(key: string): Promise<{ url: string; expiresAt: number }> {
   const { data } = await http.request({
-    url: `${BASE}/storage/${key}`,
+    url: `${API_BASE_URL}/api/v1/storage/${key}`,
     attachToken: true,
   })
 

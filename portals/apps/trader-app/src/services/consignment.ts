@@ -5,14 +5,12 @@ import type {
   ConsignmentState,
   TradeFlow,
 } from './types/consignment'
-import { http } from './http'
-import { API_BASE_URL, API_PATH_PREFIX } from '../constants'
-
-const BASE = `${API_BASE_URL}${API_PATH_PREFIX}`
+import { http, HttpError } from './http'
+import { API_BASE_URL } from '../constants'
 
 export async function createConsignment(): Promise<CreateConsignmentResponse> {
   const { data } = await http.request({
-    url: `${BASE}/consignments`,
+    url: `${API_BASE_URL}/api/v1/consignments`,
     method: 'POST',
     data: {},
     attachToken: true,
@@ -23,12 +21,12 @@ export async function createConsignment(): Promise<CreateConsignmentResponse> {
 export async function getConsignment(id: string): Promise<Consignment | null> {
   try {
     const { data } = await http.request({
-      url: `${BASE}/consignments/${id}`,
+      url: `${API_BASE_URL}/api/v1/consignments/${id}`,
       attachToken: true,
     })
     return data as Consignment
   } catch (error) {
-    if (error instanceof Error && error.message.includes('status: 404')) {
+    if (error instanceof HttpError && error.status === 404) {
       return null
     }
     throw error
@@ -48,7 +46,7 @@ export async function getAllConsignments(
   params.role = role
 
   const { data } = await http.request({
-    url: `${BASE}/consignments`,
+    url: `${API_BASE_URL}/api/v1/consignments`,
     params,
     attachToken: true,
   })

@@ -1,5 +1,5 @@
 import { http } from './http'
-import { API_BASE_URL, API_PATH_PREFIX } from '../constants'
+import { API_BASE_URL } from '../constants'
 import { sendTaskCommand } from './task'
 
 export type PreConsignmentState = 'LOCKED' | 'READY' | 'IN_PROGRESS' | 'COMPLETED'
@@ -71,14 +71,12 @@ export interface TaskCommandResponse {
   data?: unknown
 }
 
-const BASE = `${API_BASE_URL}${API_PATH_PREFIX}`
-
 export async function getTraderPreConsignments(
   offset: number = 0,
   limit: number = 50,
 ): Promise<TraderPreConsignmentsResponse> {
   const { data } = await http.request({
-    url: `${BASE}/pre-consignments`,
+    url: `${API_BASE_URL}/api/v1/pre-consignments`,
     params: { offset, limit },
     attachToken: true,
   })
@@ -108,7 +106,7 @@ export async function getTraderPreConsignments(
 
 export async function getPreConsignment(id: string): Promise<PreConsignmentInstance> {
   const { data } = await http.request({
-    url: `${BASE}/pre-consignments/${id}`,
+    url: `${API_BASE_URL}/api/v1/pre-consignments/${id}`,
     attachToken: true,
   })
   return data as PreConsignmentInstance
@@ -116,7 +114,7 @@ export async function getPreConsignment(id: string): Promise<PreConsignmentInsta
 
 export async function createPreConsignment(templateId: string): Promise<PreConsignmentInstance> {
   const { data } = await http.request({
-    url: `${BASE}/pre-consignments`,
+    url: `${API_BASE_URL}/api/v1/pre-consignments`,
     method: 'POST',
     data: { preConsignmentTemplateId: templateId } satisfies CreatePreConsignmentRequest,
     attachToken: true,
