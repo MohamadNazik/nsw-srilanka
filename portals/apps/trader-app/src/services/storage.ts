@@ -24,7 +24,7 @@ export interface UploadResponse {
 }
 
 export async function uploadFile(file: File): Promise<UploadResponse> {
-  const { data } = await http.request({
+  const { data: metadata } = await http.request<UploadMetadataResponse>({
     url: `${API_BASE_URL}/api/v1/storage`,
     method: 'POST',
     data: {
@@ -34,8 +34,6 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
     } satisfies UploadMetadataRequest,
     attachToken: true,
   })
-
-  const metadata = data as UploadMetadataResponse
 
   const uploadResponse = await fetch(metadata.upload_url, {
     method: 'PUT',
@@ -53,16 +51,14 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
 }
 
 export async function getDownloadUrl(key: string): Promise<{ url: string; expiresAt: number }> {
-  const { data } = await http.request({
+  const { data } = await http.request<DownloadMetadataResponse>({
     url: `${API_BASE_URL}/api/v1/storage/${key}`,
     attachToken: true,
   })
 
-  const response = data as DownloadMetadataResponse
+  const url = data.download_url.startsWith('/')
+    ? new URL(data.download_url, API_BASE_URL).toString()
+    : data.download_url
 
-  const url = response.download_url.startsWith('/')
-    ? new URL(response.download_url, API_BASE_URL).toString()
-    : response.download_url
-
-  return { url, expiresAt: response.expires_at }
+  return { url, expiresAt: data.expires_at }
 }

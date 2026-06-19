@@ -8,10 +8,10 @@ export async function getHSCodes(params: HSCodeQueryParams = {}): Promise<HSCode
   if (params.limit !== undefined) queryParams.limit = params.limit
   if (params.offset !== undefined) queryParams.offset = params.offset
 
-  const { data } = await http.request({
+  const { data } = await http.request<HSCodeListResult>({
     url: `${API_BASE_URL}/api/v1/hscodes`,
     params: queryParams,
     attachToken: true,
   })
-  return data as HSCodeListResult
+  return data
 }

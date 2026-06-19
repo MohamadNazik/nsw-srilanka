@@ -75,16 +75,14 @@ export async function getTraderPreConsignments(
   offset: number = 0,
   limit: number = 50,
 ): Promise<TraderPreConsignmentsResponse> {
-  const { data } = await http.request({
+  const { data } = await http.request<PreConsignmentListApiResponse>({
     url: `${API_BASE_URL}/api/v1/pre-consignments`,
     params: { offset, limit },
     attachToken: true,
   })
 
-  const response = data as PreConsignmentListApiResponse
-
-  if (Array.isArray(response)) {
-    const items: TraderPreConsignmentItem[] = response.map((instance) => ({
+  if (Array.isArray(data)) {
+    const items: TraderPreConsignmentItem[] = data.map((instance) => ({
       id: instance.preConsignmentTemplate.id,
       name: instance.preConsignmentTemplate.name,
       description: instance.preConsignmentTemplate.description,
@@ -101,25 +99,25 @@ export async function getTraderPreConsignments(
       limit: items.length,
     }
   }
-  return response
+  return data
 }
 
 export async function getPreConsignment(id: string): Promise<PreConsignmentInstance> {
-  const { data } = await http.request({
+  const { data } = await http.request<PreConsignmentInstance>({
     url: `${API_BASE_URL}/api/v1/pre-consignments/${id}`,
     attachToken: true,
   })
-  return data as PreConsignmentInstance
+  return data
 }
 
 export async function createPreConsignment(templateId: string): Promise<PreConsignmentInstance> {
-  const { data } = await http.request({
+  const { data } = await http.request<PreConsignmentInstance>({
     url: `${API_BASE_URL}/api/v1/pre-consignments`,
     method: 'POST',
     data: { preConsignmentTemplateId: templateId } satisfies CreatePreConsignmentRequest,
     attachToken: true,
   })
-  return data as PreConsignmentInstance
+  return data
 }
 
 export async function submitPreConsignmentTask(request: TaskCommandRequest): Promise<TaskCommandResponse> {
