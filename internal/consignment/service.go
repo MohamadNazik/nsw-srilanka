@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -221,6 +222,13 @@ func (s *Service) listConsignmentsWithBaseQuery(ctx context.Context, baseQuery *
 		}
 		if filter.Flow != nil {
 			q = q.Where("flow = ?", *filter.Flow)
+		}
+		if filter.Query != nil && *filter.Query != "" {
+			escaped := strings.ReplaceAll(*filter.Query, "\\", "\\\\")
+			escaped = strings.ReplaceAll(escaped, "%", "\\%")
+			escaped = strings.ReplaceAll(escaped, "_", "\\_")
+			queryVal := "%" + strings.ToLower(escaped) + "%"
+			q = q.Where("LOWER(id) LIKE ? ESCAPE '\\' OR LOWER(name) LIKE ? ESCAPE '\\'", queryVal, queryVal)
 		}
 		return q
 	}
